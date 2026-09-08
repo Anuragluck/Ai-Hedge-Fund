@@ -1,45 +1,42 @@
-import os
+import json
 from langgraph.graph import StateGraph, START, END
-
-# Import our custom components
 from agents.state import HedgeFundState
 from agents.data_fetcher import fetch_market_data
 from agents.analysts import technical_analyst
 from agents.portfolio_mgr import portfolio_manager
+from agents.risk_manager import apply_risk_management
 
-# --- LANGGRAPH WIRING ---
-# 1. Initialize the Graph with our Shared State schema
 workflow = StateGraph(HedgeFundState)
-
-# 2. Register our Agent Nodes
 workflow.add_node("data_fetcher", fetch_market_data)
 workflow.add_node("tech_analyst", technical_analyst)
 workflow.add_node("portfolio_boss", portfolio_manager)
-
-# 3. Define the Flow (Edges)
-workflow.add_edge(START, "data_fetcher")           # Step 1
-workflow.add_edge("data_fetcher", "tech_analyst")  # Step 2
-workflow.add_edge("tech_analyst", "portfolio_boss")# Step 3
-workflow.add_edge("portfolio_boss", END)           # Step 4
-
-# 4. Compile the Application
+workflow.add_edge(START, "data_fetcher")
+workflow.add_edge("data_fetcher", "tech_analyst")
+workflow.add_edge("tech_analyst", "portfolio_boss")
+workflow.add_edge("portfolio_boss", END)
 app = workflow.compile()
 
-# --- EXECUTION ---
+WATCHLIST = ["AAPL", "MSFT", "NVDA"]
+STARTING_CAPITAL = 100_000
+
 if __name__ == "__main__":
     print("🚀 Starting AI Hedge Fund Execution...\n")
-    
-    # NOTE: You must set your OpenAI API key for the LLM to work!
-    # os.environ["OPENAI_API_KEY"] = "sk-..."
-    
-    # Inject our starting memory (the stock we want to trade)
-    initial_state = {"ticker": "AAPL"}
-    
-    # Run the multi-agent system
-    final_state = app.invoke(initial_state)
-    
-    print("\n🏁 --- FINAL RUN SUMMARY ---")
-    print(f"Ticker: {final_state.get('ticker')}")
-    print(f"Technical Signal: {final_state.get('technical_signal')}")
-    print(f"Final Decision: {final_state.get('portfolio_decision')}")
-     
+
+    raw_decisions = {}
+
+    for ticker in WATCHLIST:
+        print(f"\n===== Processing {ticker} =====")
+        initial_state = {"ticker": ticker}
+        final_state = app.invoke(initial_state)
+
+        decision = final_state["portfolio_decision"]
+        current_price = float(final_state["raw_data"]["Close"].iloc[-1])
+        decision["current_price"] = current_price
+
+        raw_decisions[ticker] = decision
+
+    print("\n🛡️  --- RISK MANAGER REVIEW ---")
+    final_portfolio = apply_risk_management(raw_decisions, STARTING_CAPITAL)
+
+    print("\n🏁 --- FINAL PORTFOLIO ---")
+    print(json.dumps(final_portfolio, indent=2))

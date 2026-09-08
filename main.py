@@ -16,18 +16,23 @@ workflow.add_edge("tech_analyst", "portfolio_boss")
 workflow.add_edge("portfolio_boss", END)
 app = workflow.compile()
 
-WATCHLIST = ["AAPL", "MSFT", "NVDA"]
-STARTING_CAPITAL = 100_000
-
 if __name__ == "__main__":
-    print("🚀 Starting AI Hedge Fund Execution...\n")
+    print("🚀 AI Hedge Fund - Multi-Ticker Portfolio Analysis\n")
+
+    tickers_input = input("Enter tickers, comma-separated (e.g. AAPL,MSFT,NVDA): ").strip()
+    WATCHLIST = [t.strip().upper() for t in tickers_input.split(",") if t.strip()] or ["AAPL", "MSFT", "NVDA"]
+
+    capital_input = input("Enter starting capital in USD (default 100000): ").strip()
+    STARTING_CAPITAL = float(capital_input) if capital_input else 100_000
+
+    print(f"\nWatchlist: {WATCHLIST}")
+    print(f"Starting capital: ${STARTING_CAPITAL:,.2f}\n")
 
     raw_decisions = {}
 
     for ticker in WATCHLIST:
         print(f"\n===== Processing {ticker} =====")
-        initial_state = {"ticker": ticker}
-        final_state = app.invoke(initial_state)
+        final_state = app.invoke({"ticker": ticker})
 
         decision = final_state["portfolio_decision"]
         current_price = float(final_state["raw_data"]["Close"].iloc[-1])

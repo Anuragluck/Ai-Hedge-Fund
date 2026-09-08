@@ -4,10 +4,10 @@ from agents.state import HedgeFundState
 
 def fetch_market_data(state: HedgeFundState):
     ticker_symbol = state["ticker"]
-    print(f"[DataFetcher] Fetching 1 month of history for {ticker_symbol}...")
+    print(f"[DataFetcher] Fetching 1 year of history for {ticker_symbol}...")
 
     stock = yf.Ticker(ticker_symbol)
-    historical_data = stock.history(period="1mo")
+    historical_data = stock.history(period="1y")
 
     if historical_data.empty:
         raise ValueError(f"No data found for ticker '{ticker_symbol}'")

@@ -12,6 +12,7 @@ class TradeDecision(BaseModel):
 def portfolio_manager(state: HedgeFundState):
     ticker = state.get("ticker", "UNKNOWN")
     tech_signal = state.get("technical_signal", "NEUTRAL")
+    tech_detail = state.get("technical_detail", "")
     data = state.get("raw_data")
 
     current_price = round(data['Close'].iloc[-1], 2) if data is not None and not data.empty else "N/A"
@@ -30,10 +31,11 @@ def portfolio_manager(state: HedgeFundState):
     You are a quantitative hedge fund portfolio manager.
     Stock: {ticker}
     Current Price: ${current_price}
-    Technical Signal: {tech_signal}
+    Overall Technical Signal: {tech_signal}
+    Timeframe Breakdown: {tech_detail}
 
     Based on this data, make a trading decision: BUY, SELL, or HOLD.
-    Justify it in one concise sentence referencing the technical signal.
+    Justify it in one concise sentence, referencing which timeframe(s) drove your call.
     """
 
     print(f"[PortfolioManager] Asking LLM for a decision on {ticker}...")

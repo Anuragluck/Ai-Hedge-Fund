@@ -12,5 +12,11 @@ def fetch_market_data(state: HedgeFundState):
     if historical_data.empty:
         raise ValueError(f"No data found for ticker '{ticker_symbol}'")
 
+    # Drop any rows with missing Close prices (e.g. an incomplete "today" row)
+    historical_data = historical_data.dropna(subset=["Close"])
+
+    if historical_data.empty:
+        raise ValueError(f"All data for '{ticker_symbol}' was invalid after cleaning")
+
     print(f"[DataFetcher] Got {len(historical_data)} days of data. Latest close: ${historical_data['Close'].iloc[-1]:.2f}")
     return {"raw_data": historical_data}

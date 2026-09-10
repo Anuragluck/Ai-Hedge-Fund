@@ -1,0 +1,18 @@
+{
+  "cash": 881144.21,
+  "holdings": {
+    "NVDA": {
+      "quantity": 437,
+      "avg_price": 223.6699981689453
+    }
+  },
+  "transactions": [
+    {
+      "date": "2026-09-10 08:16:12",
+      "ticker": "NVDA",
+      "action": "BUY",
+      "quantity": 437,
+      "price": 223.6699981689453
+    }
+  ]
+}

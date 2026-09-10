@@ -5,7 +5,7 @@ from agents.data_fetcher import fetch_market_data
 from agents.analysts import technical_analyst
 from agents.portfolio_mgr import portfolio_manager
 from agents.risk_manager import apply_risk_management
-from agents.portfolio_state import load_portfolio, save_portfolio, apply_trades
+from agents.portfolio_state import load_portfolio, save_portfolio ,apply_trades
 import os
 
 workflow = StateGraph(HedgeFundState)
@@ -63,7 +63,7 @@ def get_portfolio_for_this_run():
 
 
 if __name__ == "__main__":
-    print("🚀 AI Hedge Fund - Multi-Ticker Portfolio Analysis\n")
+    print(" AI Hedge Fund - Multi-Ticker Portfolio Analysis\n")
 
     portfolio = get_portfolio_for_this_run()
 

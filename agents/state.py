@@ -6,4 +6,5 @@ class HedgeFundState(TypedDict):
     technical_signal: Optional[str]
     technical_detail: Optional[str]
     fundamental_signal: Optional[str]
+    fundamental_detail: Optional[str]
     portfolio_decision: Optional[dict]

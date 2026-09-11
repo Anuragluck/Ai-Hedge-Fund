@@ -83,7 +83,7 @@ def apply_trades(portfolio, risk_adjusted_decisions):
             held = portfolio["holdings"][ticker]
             price = decision["current_price"]
             proceeds = held["quantity"] * price
-            portfolio["cash"] += proceeds
+            portfolio["cash"]=proceeds
 
             _log_transaction(portfolio, ticker, "SELL", held["quantity"], price)
             print(f"[Portfolio] Sold all {held['quantity']} {ticker} for ${proceeds:.2f}. "

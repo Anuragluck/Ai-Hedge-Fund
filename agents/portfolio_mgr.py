@@ -13,6 +13,8 @@ def portfolio_manager(state: HedgeFundState):
     ticker = state.get("ticker", "UNKNOWN")
     tech_signal = state.get("technical_signal", "NEUTRAL")
     tech_detail = state.get("technical_detail", "")
+    fund_signal = state.get("fundamental_signal", "NEUTRAL")
+    fund_detail = state.get("fundamental_detail", "")
     data = state.get("raw_data")
 
     current_price = round(data['Close'].iloc[-1], 2) if data is not None and not data.empty else "N/A"
@@ -31,11 +33,17 @@ def portfolio_manager(state: HedgeFundState):
     You are a quantitative hedge fund portfolio manager.
     Stock: {ticker}
     Current Price: ${current_price}
-    Overall Technical Signal: {tech_signal}
-    Timeframe Breakdown: {tech_detail}
 
-    Based on this data, make a trading decision: BUY, SELL, or HOLD.
-    Justify it in one concise sentence, referencing which timeframe(s) drove your call.
+    Technical Signal: {tech_signal}
+    Technical Breakdown: {tech_detail}
+
+    Fundamental Signal: {fund_signal}
+    Fundamental Breakdown: {fund_detail}
+
+    Based on both technical and fundamental data, make a trading decision: BUY, SELL, or HOLD.
+    If the two signals agree, say so and act on the consensus.
+    If they conflict, explicitly state the conflict and explain which one you weighted more heavily and why.
+    Keep your reasoning to one or two concise sentences.
     """
 
     print(f"[PortfolioManager] Asking LLM for a decision on {ticker}...")

@@ -2,19 +2,23 @@ import json
 from langgraph.graph import StateGraph, START, END
 from agents.state import HedgeFundState
 from agents.data_fetcher import fetch_market_data
-from agents.analysts import technical_analyst
+from agents.analysts import technical_analyst, fundamental_analyst
 from agents.portfolio_mgr import portfolio_manager
 from agents.risk_manager import apply_risk_management
-from agents.portfolio_state import load_portfolio, save_portfolio ,apply_trades
+from agents.portfolio_state import load_portfolio, save_portfolio, apply_trades
 import os
 
 workflow = StateGraph(HedgeFundState)
 workflow.add_node("data_fetcher", fetch_market_data)
 workflow.add_node("tech_analyst", technical_analyst)
+workflow.add_node("fundamental_analyst", fundamental_analyst)
 workflow.add_node("portfolio_boss", portfolio_manager)
+
 workflow.add_edge(START, "data_fetcher")
 workflow.add_edge("data_fetcher", "tech_analyst")
+workflow.add_edge("data_fetcher", "fundamental_analyst")
 workflow.add_edge("tech_analyst", "portfolio_boss")
+workflow.add_edge("fundamental_analyst", "portfolio_boss")
 workflow.add_edge("portfolio_boss", END)
 app = workflow.compile()
 
@@ -29,7 +33,7 @@ def ask_starting_capital():
 def get_portfolio_for_this_run():
     if not os.path.exists(PORTFOLIO_FILE):
         starting_capital = ask_starting_capital()
-        portfolio = {"cash": starting_capital, "holdings": {}}
+        portfolio = {"cash": starting_capital, "holdings": {}, "transactions": []}
         save_portfolio(portfolio)
         print(f"[Portfolio] Starting fresh with ${starting_capital:,.2f}")
         return portfolio
@@ -42,11 +46,11 @@ def get_portfolio_for_this_run():
         "Choice (default 1): "
     ).strip()
 
-    portfolio = load_portfolio(ask_starting_capital)  # loads existing since file exists
+    portfolio = load_portfolio(ask_starting_capital)
 
     if choice == "2":
         new_capital = ask_starting_capital()
-        portfolio = {"cash": new_capital, "holdings": {}}
+        portfolio = {"cash": new_capital, "holdings": {}, "transactions": []}
         save_portfolio(portfolio)
         print(f"[Portfolio] Reset. Starting fresh with ${new_capital:,.2f}")
     elif choice == "3":
@@ -63,7 +67,7 @@ def get_portfolio_for_this_run():
 
 
 if __name__ == "__main__":
-    print(" AI Hedge Fund - Multi-Ticker Portfolio Analysis\n")
+    print("🚀 AI Hedge Fund - Multi-Ticker Portfolio Analysis\n")
 
     portfolio = get_portfolio_for_this_run()
 

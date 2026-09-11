@@ -1,3 +1,4 @@
+import yfinance as yf
 from agents.state import HedgeFundState
 
 
@@ -44,3 +45,61 @@ def technical_analyst(state: HedgeFundState):
 
     print(f"[TechnicalAnalyst] {detail} -> Overall: {overall}")
     return {"technical_signal": overall, "technical_detail": detail}
+
+
+def fundamental_analyst(state: HedgeFundState):
+    ticker = state["ticker"]
+    print(f"[FundamentalAnalyst] Fetching fundamental data for {ticker}...")
+
+    try:
+        info = yf.Ticker(ticker).info
+    except Exception as e:
+        print(f"[FundamentalAnalyst] Could not fetch fundamentals: {e}")
+        return {"fundamental_signal": "NEUTRAL", "fundamental_detail": "Data unavailable"}
+
+    pe_ratio = info.get("trailingPE")
+    debt_to_equity = info.get("debtToEquity")
+
+    verdicts = []
+    detail_parts = []
+
+    if pe_ratio is not None:
+        if pe_ratio < 15:
+            verdict = "UNDERVALUED"
+        elif pe_ratio > 30:
+            verdict = "OVERVALUED"
+        else:
+            verdict = "FAIR"
+        verdicts.append(verdict)
+        detail_parts.append(f"P/E: {pe_ratio:.1f} -> {verdict}")
+    else:
+        detail_parts.append("P/E: N/A")
+
+    if debt_to_equity is not None:
+        if debt_to_equity < 50:
+            verdict = "UNDERVALUED"
+        elif debt_to_equity > 150:
+            verdict = "OVERVALUED"
+        else:
+            verdict = "FAIR"
+        verdicts.append(verdict)
+        detail_parts.append(f"Debt/Equity: {debt_to_equity:.1f} -> {verdict}")
+    else:
+        detail_parts.append("Debt/Equity: N/A")
+
+    if not verdicts:
+        overall = "NEUTRAL"
+    else:
+        under = verdicts.count("UNDERVALUED")
+        over = verdicts.count("OVERVALUED")
+        if under > over:
+            overall = "UNDERVALUED"
+        elif over > under:
+            overall = "OVERVALUED"
+        else:
+            overall = "FAIR"
+
+    detail = " | ".join(detail_parts)
+    print(f"[FundamentalAnalyst] {detail} -> Overall: {overall}")
+
+    return {"fundamental_signal": overall, "fundamental_detail": detail}

@@ -15,6 +15,8 @@ def portfolio_manager(state: HedgeFundState):
     tech_detail = state.get("technical_detail", "")
     fund_signal = state.get("fundamental_signal", "NEUTRAL")
     fund_detail = state.get("fundamental_detail", "")
+    sent_signal = state.get("sentiment_signal", "NEUTRAL")
+    sent_detail = state.get("sentiment_detail", "")
     data = state.get("raw_data")
 
     current_price = round(data['Close'].iloc[-1], 2) if data is not None and not data.empty else "N/A"
@@ -40,10 +42,13 @@ def portfolio_manager(state: HedgeFundState):
     Fundamental Signal: {fund_signal}
     Fundamental Breakdown: {fund_detail}
 
-    Based on both technical and fundamental data, make a trading decision: BUY, SELL, or HOLD.
-    If the two signals agree, say so and act on the consensus.
-    If they conflict, explicitly state the conflict and explain which one you weighted more heavily and why.
-    Keep your reasoning to one or two concise sentences.
+    Sentiment Signal: {sent_signal}
+    Sentiment Breakdown: {sent_detail}
+
+    Based on all three signals, make a trading decision: BUY, SELL, or HOLD.
+    If signals agree, say so and act on the consensus.
+    If they conflict, explicitly state which signals disagree and which one you weighted
+    more heavily, and why. Keep your reasoning to one or two concise sentences.
     """
 
     print(f"[PortfolioManager] Asking LLM for a decision on {ticker}...")

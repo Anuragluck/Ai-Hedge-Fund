@@ -1,6 +1,11 @@
+import os
 import yfinance as yf
+from pydantic import BaseModel, Field
+from langchain_groq import ChatGroq
 from agents.state import HedgeFundState
 
+
+# ---------- Technical Analyst (deterministic) ----------
 
 def _trend_signal(close_prices, window):
     if len(close_prices) < window:
@@ -46,6 +51,8 @@ def technical_analyst(state: HedgeFundState):
     print(f"[TechnicalAnalyst] {detail} -> Overall: {overall}")
     return {"technical_signal": overall, "technical_detail": detail}
 
+
+# ---------- Fundamental Analyst (deterministic) ----------
 
 def fundamental_analyst(state: HedgeFundState):
     ticker = state["ticker"]
@@ -103,3 +110,58 @@ def fundamental_analyst(state: HedgeFundState):
     print(f"[FundamentalAnalyst] {detail} -> Overall: {overall}")
 
     return {"fundamental_signal": overall, "fundamental_detail": detail}
+
+
+# ---------- Sentiment Analyst (LLM-based, on purpose) ----------
+
+class SentimentSignal(BaseModel):
+    sentiment: str = Field(description="One of: BULLISH, BEARISH, NEUTRAL")
+    reasoning: str = Field(description="One concise sentence")
+
+
+def sentiment_analyst(state: HedgeFundState):
+    ticker = state["ticker"]
+    print(f"[SentimentAnalyst] Fetching recent news for {ticker}...")
+
+    try:
+        news_items = yf.Ticker(ticker).news
+    except Exception as e:
+        print(f"[SentimentAnalyst] Could not fetch news: {e}")
+        return {"sentiment_signal": "NEUTRAL", "sentiment_detail": "News unavailable"}
+
+    headlines = []
+    for item in (news_items or [])[:8]:
+        title = item.get("title") or item.get("content", {}).get("title")
+        if title:
+            headlines.append(title)
+
+    if not headlines:
+        print("[SentimentAnalyst] No headlines found, defaulting to NEUTRAL")
+        return {"sentiment_signal": "NEUTRAL", "sentiment_detail": "No recent headlines found"}
+
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        raise EnvironmentError(
+            "GROQ_API_KEY not set. Get a free key at https://console.groq.com/keys "
+            "then run: export GROQ_API_KEY=your_key_here"
+        )
+
+    llm = ChatGroq(model="openai/gpt-oss-20b", temperature=0, api_key=api_key)
+    structured_llm = llm.with_structured_output(SentimentSignal)
+
+    headlines_text = "\n".join(f"- {h}" for h in headlines)
+    prompt = f"""
+    You are a financial sentiment analyst.
+    Stock: {ticker}
+    Recent headlines:
+    {headlines_text}
+
+    Based only on these headlines, classify the overall market sentiment toward {ticker}
+    as BULLISH, BEARISH, or NEUTRAL. Give one concise sentence of reasoning.
+    """
+
+    print(f"[SentimentAnalyst] Asking LLM to interpret {len(headlines)} headlines...")
+    result: SentimentSignal = structured_llm.invoke(prompt)
+
+    print(f"[SentimentAnalyst] {result.sentiment} - {result.reasoning}")
+    return {"sentiment_signal": result.sentiment, "sentiment_detail": result.reasoning}

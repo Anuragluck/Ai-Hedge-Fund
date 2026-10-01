@@ -1,61 +1,60 @@
-import os
 from pydantic import BaseModel, Field
-from langchain_groq import ChatGroq
+
+from agents.config import BUY_THRESHOLD, SELL_THRESHOLD
+from agents.decision import decide
+from agents.llm_utils import call_structured
 from agents.state import HedgeFundState
 
-from typing import Literal
 
-class TradeDecision(BaseModel):
-    action: Literal["BUY", "SELL", "HOLD"]
-    reasoning: str = Field(description="A concise, one-sentence explanation")
+class Explanation(BaseModel):
+    explanation: str = Field(description="One or two sentences: why the action follows from the evidence")
+    uncertainty: str = Field(description="One sentence on the main uncertainty in the evidence")
+
+
+def _fallback(decision):
+    parts = [f"{n} {c['signal']} ({c['contribution']:+.2f})" for n, c in decision["components"].items()]
+    text = f"Rule score {decision['score']:+.2f} -> {decision['action']}. " + "; ".join(parts) + "."
+    uncertainty = "LLM explanation unavailable; this text came from the rule template."
+    if decision["missing"]:
+        uncertainty += " Missing signals: " + ", ".join(decision["missing"]) + "."
+    return text, uncertainty
 
 
 def portfolio_manager(state: HedgeFundState):
     ticker = state.get("ticker", "UNKNOWN")
-    tech_signal = state.get("technical_signal", "NEUTRAL")
-    tech_detail = state.get("technical_detail", "")
-    fund_signal = state.get("fundamental_signal", "NEUTRAL")
-    fund_detail = state.get("fundamental_detail", "")
-    sent_signal = state.get("sentiment_signal", "NEUTRAL")
-    sent_detail = state.get("sentiment_detail", "")
-    data = state.get("raw_data")
+    signals = {
+        "technical": state.get("technical_signal"),
+        "fundamental": state.get("fundamental_signal"),
+        "sentiment": state.get("sentiment_signal"),
+    }
 
-    current_price = round(data['Close'].iloc[-1], 2) if data is not None and not data.empty else "N/A"
+    # 1. Python decides.
+    decision = decide(signals)
 
-    api_key = os.environ.get("GROQ_API_KEY")
-    if not api_key:
-        raise EnvironmentError(
-            "GROQ_API_KEY not set. Get a free key at https://console.groq.com/keys "
-            "then run: export GROQ_API_KEY=your_key_here"
-        )
+    # 2. The LLM only explains. If it fails, a template explanation is used.
+    prompt = (
+        f"Stock: {ticker}\n"
+        f"The action {decision['action']} was ALREADY chosen by a fixed scoring rule "
+        f"(score {decision['score']:+.2f}; BUY if >= {BUY_THRESHOLD}, SELL if <= {SELL_THRESHOLD}).\n"
+        f"Technical: {signals['technical']} - {state.get('technical_detail')}\n"
+        f"Fundamental: {signals['fundamental']} - {state.get('fundamental_detail')}\n"
+        f"Sentiment: {signals['sentiment']} - {state.get('sentiment_detail')}\n"
+        f"Signals conflict: {decision['conflict']}. Missing signals: {decision['missing'] or 'none'}.\n\n"
+        "Explain in one or two sentences why this action follows from the evidence, naming any "
+        "signals that disagree and how the score resolved it. Then give one sentence on the main "
+        "uncertainty. Do not change the action, do not predict prices, and do not mention facts "
+        "that are not listed above."
+    )
+    parsed, info = call_structured(Explanation, prompt)
 
-    llm = ChatGroq(model="openai/gpt-oss-20b", temperature=0, api_key=api_key)
-    structured_llm = llm.with_structured_output(TradeDecision)
+    if parsed is None:
+        print(f"[PortfolioManager] LLM explanation unavailable ({info['error']}); using rule template")
+        reasoning, uncertainty = _fallback(decision)
+        source = "fallback"
+    else:
+        reasoning, uncertainty, source = parsed.explanation, parsed.uncertainty, "llm"
 
-    prompt = f"""
-    You are a quantitative hedge fund portfolio manager.
-    Stock: {ticker}
-    Current Price: ${current_price}
-
-    Technical Signal: {tech_signal}
-    Technical Breakdown: {tech_detail}
-
-    Fundamental Signal: {fund_signal}
-    Fundamental Breakdown: {fund_detail}
-
-    Sentiment Signal: {sent_signal}
-    Sentiment Breakdown: {sent_detail}
-
-    Based on all three signals, make a trading decision: BUY, SELL, or HOLD.
-    If signals agree, say so and act on the consensus.
-    If they conflict, explicitly state which signals disagree and which one you weighted
-    more heavily, and why. Keep your reasoning to one or two concise sentences.
-    """
-
-    print(f"[PortfolioManager] Asking LLM for a decision on {ticker}...")
-    result: TradeDecision = structured_llm.invoke(prompt)
-
-    decision = {"action": result.action, "reasoning": result.reasoning}
-    print(f"[PortfolioManager] Decision: {decision}")
-
+    decision.update({"reasoning": reasoning, "uncertainty": uncertainty,
+                     "explanation_source": source, "llm": info})
+    print(f"[PortfolioManager] {ticker}: {decision['action']} (score {decision['score']:+.2f}) - {reasoning}")
     return {"portfolio_decision": decision}

@@ -1,58 +1,28 @@
-import os
+from typing import Literal
+
 import yfinance as yf
 from pydantic import BaseModel, Field
-from langchain_groq import ChatGroq
+
+from agents.llm_utils import call_structured
+from agents.signals import WINDOWS, overall_technical_signal
 from agents.state import HedgeFundState
 
 
-# ---------- Technical Analyst (deterministic) ----------
-
-def _trend_signal(close_prices, window):
-    if len(close_prices) < window:
-        return None
-    sma = close_prices.tail(window).mean()
-    current = close_prices.iloc[-1]
-    if current > sma * 1.005:
-        return "BULLISH"
-    elif current < sma * 0.995:
-        return "BEARISH"
-    return "NEUTRAL"
-
+# ---------- Technical (deterministic) ----------
 
 def technical_analyst(state: HedgeFundState):
     data = state.get("raw_data")
     if data is None or data.empty:
-        print("[TechnicalAnalyst] No data available, defaulting to NEUTRAL")
-        return {"technical_signal": "NEUTRAL", "technical_detail": "No data available"}
+        print("[TechnicalAnalyst] No data available")
+        return {"technical_signal": "N/A", "technical_detail": "No data available"}
 
-    close_prices = data['Close']
-
-    short_term = _trend_signal(close_prices, 20)
-    medium_term = _trend_signal(close_prices, 50)
-    long_term = _trend_signal(close_prices, 200)
-
-    signals = [s for s in (short_term, medium_term, long_term) if s is not None]
-    bullish_count = signals.count("BULLISH")
-    bearish_count = signals.count("BEARISH")
-
-    if bullish_count > bearish_count:
-        overall = "BULLISH"
-    elif bearish_count > bullish_count:
-        overall = "BEARISH"
-    else:
-        overall = "NEUTRAL"
-
-    detail = (
-        f"Short-term (20d): {short_term or 'N/A'} | "
-        f"Medium-term (50d): {medium_term or 'N/A'} | "
-        f"Long-term (200d): {long_term or 'N/A'}"
-    )
-
+    overall, votes = overall_technical_signal(data["Close"])
+    detail = " | ".join(f"{name} ({days}d): {votes[name] or 'N/A'}" for name, days in WINDOWS)
     print(f"[TechnicalAnalyst] {detail} -> Overall: {overall}")
     return {"technical_signal": overall, "technical_detail": detail}
 
 
-# ---------- Fundamental Analyst (deterministic) ----------
+# ---------- Fundamental (deterministic, crude thresholds) ----------
 
 def fundamental_analyst(state: HedgeFundState):
     ticker = state["ticker"]
@@ -62,106 +32,86 @@ def fundamental_analyst(state: HedgeFundState):
         info = yf.Ticker(ticker).info
     except Exception as e:
         print(f"[FundamentalAnalyst] Could not fetch fundamentals: {e}")
-        return {"fundamental_signal": "NEUTRAL", "fundamental_detail": "Data unavailable"}
+        return {"fundamental_signal": "N/A", "fundamental_detail": f"Data unavailable: {e}"}
 
-    pe_ratio = info.get("trailingPE")
-    debt_to_equity = info.get("debtToEquity")
+    pe, de = info.get("trailingPE"), info.get("debtToEquity")
+    verdicts, parts = [], []
 
-    verdicts = []
-    detail_parts = []
-
-    if pe_ratio is not None:
-        if pe_ratio < 15:
-            verdict = "UNDERVALUED"
-        elif pe_ratio > 30:
-            verdict = "OVERVALUED"
-        else:
-            verdict = "FAIR"
-        verdicts.append(verdict)
-        detail_parts.append(f"P/E: {pe_ratio:.1f} -> {verdict}")
+    if isinstance(pe, (int, float)) and pe > 0:
+        v = "UNDERVALUED" if pe < 15 else "OVERVALUED" if pe > 30 else "FAIR"
+        verdicts.append(v)
+        parts.append(f"P/E: {pe:.1f} -> {v}")
     else:
-        detail_parts.append("P/E: N/A")
+        parts.append("P/E: N/A (missing or negative earnings)")
 
-    if debt_to_equity is not None:
-        if debt_to_equity < 50:
-            verdict = "UNDERVALUED"
-        elif debt_to_equity > 150:
-            verdict = "OVERVALUED"
-        else:
-            verdict = "FAIR"
-        verdicts.append(verdict)
-        detail_parts.append(f"Debt/Equity: {debt_to_equity:.1f} -> {verdict}")
+    if isinstance(de, (int, float)) and de >= 0:
+        v = "UNDERVALUED" if de < 50 else "OVERVALUED" if de > 150 else "FAIR"
+        verdicts.append(v)
+        parts.append(f"Debt/Equity: {de:.1f} -> {v}")
     else:
-        detail_parts.append("Debt/Equity: N/A")
+        parts.append("Debt/Equity: N/A")
 
     if not verdicts:
-        overall = "NEUTRAL"
+        overall = "N/A"
     else:
-        under = verdicts.count("UNDERVALUED")
-        over = verdicts.count("OVERVALUED")
-        if under > over:
-            overall = "UNDERVALUED"
-        elif over > under:
-            overall = "OVERVALUED"
-        else:
-            overall = "FAIR"
+        under, over = verdicts.count("UNDERVALUED"), verdicts.count("OVERVALUED")
+        overall = "UNDERVALUED" if under > over else "OVERVALUED" if over > under else "FAIR"
 
-    detail = " | ".join(detail_parts)
+    detail = " | ".join(parts)
     print(f"[FundamentalAnalyst] {detail} -> Overall: {overall}")
-
     return {"fundamental_signal": overall, "fundamental_detail": detail}
 
 
-# ---------- Sentiment Analyst (LLM-based, on purpose) ----------
-from typing import Literal
+# ---------- Sentiment (LLM reads headlines; Python handles every failure) ----------
+
 class SentimentSignal(BaseModel):
     sentiment: Literal["BULLISH", "BEARISH", "NEUTRAL"]
-    reasoning: str = Field(description="One concise sentence")
+    summary: str = Field(description="One or two sentences on what the headlines say")
+
+
+def _extract_headlines(news_items, limit=8):
+    out = []
+    for item in (news_items or [])[:limit]:
+        content = item.get("content") or {}
+        title = item.get("title") or content.get("title")
+        if title:
+            out.append({"title": title,
+                        "published": content.get("pubDate") or item.get("providerPublishTime")})
+    return out
 
 
 def sentiment_analyst(state: HedgeFundState):
     ticker = state["ticker"]
     print(f"[SentimentAnalyst] Fetching recent news for {ticker}...")
 
+    def unavailable(reason, headlines=None, info=None):
+        print(f"[SentimentAnalyst] Signal set to N/A: {reason}")
+        return {"sentiment_signal": "N/A", "sentiment_detail": reason,
+                "sentiment_headlines": headlines or [], "sentiment_llm": info}
+
     try:
-        news_items = yf.Ticker(ticker).news
+        news = yf.Ticker(ticker).news
     except Exception as e:
-        print(f"[SentimentAnalyst] Could not fetch news: {e}")
-        return {"sentiment_signal": "NEUTRAL", "sentiment_detail": "News unavailable"}
+        return unavailable(f"News unavailable: {e}")
 
-    headlines = []
-    for item in (news_items or [])[:8]:
-        title = item.get("title") or item.get("content", {}).get("title")
-        if title:
-            headlines.append(title)
-
+    headlines = _extract_headlines(news)
     if not headlines:
-        print("[SentimentAnalyst] No headlines found, defaulting to NEUTRAL")
-        return {"sentiment_signal": "NEUTRAL", "sentiment_detail": "No recent headlines found"}
+        return unavailable("No recent headlines found")
 
-    api_key = os.environ.get("GROQ_API_KEY")
-    if not api_key:
-        raise EnvironmentError(
-            "GROQ_API_KEY not set. Get a free key at https://console.groq.com/keys "
-            "then run: export GROQ_API_KEY=your_key_here"
-        )
-
-    llm = ChatGroq(model="openai/gpt-oss-20b", temperature=0, api_key=api_key)
-    structured_llm = llm.with_structured_output(SentimentSignal)
-
-    headlines_text = "\n".join(f"- {h}" for h in headlines)
-    prompt = f"""
-    You are a financial sentiment analyst.
-    Stock: {ticker}
-    Recent headlines:
-    {headlines_text}
-
-    Based only on these headlines, classify the overall market sentiment toward {ticker}
-    as BULLISH, BEARISH, or NEUTRAL. Give one concise sentence of reasoning.
-    """
+    titles = "\n".join(f"- {h['title']}" for h in headlines)
+    prompt = (
+        f"You are a financial news analyst. Stock: {ticker}.\n"
+        f"Headlines:\n{titles}\n\n"
+        "Using ONLY these headlines, classify the overall tone toward the stock as BULLISH, "
+        "BEARISH or NEUTRAL (use NEUTRAL if mixed, unrelated or unclear) and summarise what "
+        "they say in one or two sentences. Do not predict prices and do not use outside knowledge."
+    )
 
     print(f"[SentimentAnalyst] Asking LLM to interpret {len(headlines)} headlines...")
-    result: SentimentSignal = structured_llm.invoke(prompt)
+    parsed, info = call_structured(SentimentSignal, prompt)
+    if parsed is None:
+        return unavailable(f"LLM unavailable: {info['error']}", headlines, info)
 
-    print(f"[SentimentAnalyst] {result.sentiment} - {result.reasoning}")
-    return {"sentiment_signal": result.sentiment, "sentiment_detail": result.reasoning}
+    print(f"[SentimentAnalyst] {parsed.sentiment} - {parsed.summary}")
+    return {"sentiment_signal": parsed.sentiment, "sentiment_detail": parsed.summary,
+            "sentiment_headlines": headlines, "sentiment_llm": info}

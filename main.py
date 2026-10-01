@@ -1,50 +1,43 @@
-import json
-from langgraph.graph import StateGraph, START, END
-from agents.state import HedgeFundState
-from agents.data_fetcher import fetch_market_data
-from agents.analysts import technical_analyst, fundamental_analyst, sentiment_analyst
-from agents.portfolio_mgr import portfolio_manager
-from agents.risk_manager import apply_risk_management
-from agents.portfolio_state import load_portfolio, save_portfolio, apply_trades
-import os
 import copy
+import json
+import os
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from agents.data_fetcher import fetch_latest_prices
+from agents import config
 from agents.audit import append_audit_record
-
-workflow = StateGraph(HedgeFundState)
-workflow.add_node("data_fetcher", fetch_market_data)
-workflow.add_node("tech_analyst", technical_analyst)
-workflow.add_node("fundamental_analyst", fundamental_analyst)
-workflow.add_node("sentiment_analyst", sentiment_analyst)
-workflow.add_node("portfolio_boss", portfolio_manager)
-
-workflow.add_edge(START, "data_fetcher")
-workflow.add_edge("data_fetcher", "tech_analyst")
-workflow.add_edge("data_fetcher", "fundamental_analyst")
-workflow.add_edge("data_fetcher", "sentiment_analyst")
-workflow.add_edge("tech_analyst", "portfolio_boss")
-workflow.add_edge("fundamental_analyst", "portfolio_boss")
-workflow.add_edge("sentiment_analyst", "portfolio_boss")
-workflow.add_edge("portfolio_boss", END)
-app = workflow.compile()
+from agents.data_fetcher import fetch_latest_prices
+from agents.graph import app
+from agents.portfolio_state import (apply_orders, load_portfolio, new_portfolio,
+                                    portfolio_equity, save_portfolio)
+from agents.risk_manager import print_review, review_trades
 
 PORTFOLIO_FILE = "portfolio.json"
+CONFIG_KEYS = ("MAX_POSITION_PCT", "MAX_TOTAL_EXPOSURE_PCT", "MIN_CASH_PCT", "STOP_LOSS_PCT",
+               "MAX_DRAWDOWN_PCT", "FEE_BPS", "SLIPPAGE_BPS", "WEIGHTS", "BUY_THRESHOLD",
+               "SELL_THRESHOLD", "LLM_MODEL")
 
 
-def ask_starting_capital():
-    capital_input = input("Enter starting capital in USD (default 100000): ").strip()
-    return float(capital_input) if capital_input else 100_000
+def ask_float(prompt, default, minimum):
+    while True:
+        raw = input(prompt).strip()
+        if not raw:
+            return default
+        try:
+            value = float(raw.replace(",", ""))
+            if value >= minimum:
+                return value
+        except ValueError:
+            pass
+        print(f"Please enter a number >= {minimum}.")
 
 
 def get_portfolio_for_this_run():
     if not os.path.exists(PORTFOLIO_FILE):
-        starting_capital = ask_starting_capital()
-        portfolio = {"cash": starting_capital, "holdings": {}, "transactions": []}
+        capital = ask_float("Enter starting capital in USD (default 100000): ", 100_000, 1)
+        portfolio = new_portfolio(capital)
         save_portfolio(portfolio)
-        print(f"[Portfolio] Starting fresh with ${starting_capital:,.2f}")
+        print(f"[Portfolio] Starting fresh with ${capital:,.2f}")
         return portfolio
 
     choice = input(
@@ -55,116 +48,99 @@ def get_portfolio_for_this_run():
         "Choice (default 1): "
     ).strip()
 
-    portfolio = load_portfolio(ask_starting_capital)
+    portfolio = load_portfolio(lambda: 100_000)
 
     if choice == "2":
-        new_capital = ask_starting_capital()
-        portfolio = {"cash": new_capital, "holdings": {}, "transactions": []}
+        capital = ask_float("Enter starting capital in USD (default 100000): ", 100_000, 1)
+        portfolio = new_portfolio(capital)
         save_portfolio(portfolio)
-        print(f"[Portfolio] Reset. Starting fresh with ${new_capital:,.2f}")
+        print(f"[Portfolio] Reset. Starting fresh with ${capital:,.2f}")
     elif choice == "3":
-        added = input("How much additional capital to add? $").strip()
-        added_amount = float(added) if added else 0
-        portfolio["cash"] += added_amount
+        added = ask_float("How much additional capital to add? $", 0, 0)
+        portfolio["cash"] += added
+        portfolio["peak_equity"] += added     # a deposit is not a gain
         save_portfolio(portfolio)
-        print(f"[Portfolio] Added ${added_amount:,.2f}. New cash balance: ${portfolio['cash']:,.2f}")
+        print(f"[Portfolio] Added ${added:,.2f}. New cash balance: ${portfolio['cash']:,.2f}")
     else:
         print(f"[Portfolio] Continuing with ${portfolio['cash']:,.2f} cash, "
               f"{len(portfolio['holdings'])} position(s)")
-
     return portfolio
 
 
-if __name__ == "__main__":
-    print("AI Hedge Fund - Multi-Ticker Portfolio Analysis\n")
+def run():
+    print("AI Hedge Fund - Research Prototype (simulated trades only)\n")
 
     portfolio = get_portfolio_for_this_run()
     portfolio_before = copy.deepcopy(portfolio)
 
-    tickers_input = input(
-        "\nEnter tickers to analyze this run, comma-separated "
-        "(e.g. AAPL,MSFT,NVDA): "
-    ).strip()
-
-    watchlist = list(dict.fromkeys(
-        ticker.strip().upper()
-        for ticker in tickers_input.split(",")
-        if ticker.strip()
-    )) or ["AAPL", "MSFT", "NVDA"]
+    raw = input("\nEnter tickers to analyze this run, comma-separated (e.g. AAPL,MSFT,NVDA): ").strip()
+    watchlist = list(dict.fromkeys(t.strip().upper() for t in raw.split(",") if t.strip())) \
+        or ["AAPL", "MSFT", "NVDA"]
 
     run_id = str(uuid4())
-
     print(f"\nWatchlist: {watchlist}")
     print(f"Available cash: ${portfolio['cash']:,.2f}\n")
 
-    raw_decisions = {}
-    analysis_records = {}
+    decisions, prices, analysis, errors = {}, {}, {}, {}
 
     for ticker in watchlist:
         print(f"\n===== Processing {ticker} =====")
-        final_state = app.invoke({"ticker": ticker})
+        try:
+            state = app.invoke({"ticker": ticker})
+        except Exception as e:
+            errors[ticker] = f"{type(e).__name__}: {e}"
+            print(f"[Main] Skipping {ticker}: {errors[ticker]}")
+            continue
 
-        decision = dict(final_state["portfolio_decision"])
-        current_price = float(final_state["raw_data"]["Close"].iloc[-1])
-        decision["current_price"] = current_price
-        raw_decisions[ticker] = decision
-
-        analysis_records[ticker] = {
-            "market_data_as_of": str(final_state["raw_data"].index[-1]),
-            "current_price": current_price,
-            "signals": {
-                "technical": final_state.get("technical_signal"),
-                "technical_detail": final_state.get("technical_detail"),
-                "fundamental": final_state.get("fundamental_signal"),
-                "fundamental_detail": final_state.get("fundamental_detail"),
-                "sentiment": final_state.get("sentiment_signal"),
-                "sentiment_detail": final_state.get("sentiment_detail"),
-            },
-            "portfolio_decision": decision,
+        price = float(state["raw_data"]["Close"].iloc[-1])
+        decision = dict(state["portfolio_decision"])
+        decision["current_price"] = price
+        decisions[ticker] = decision
+        prices[ticker] = price
+        analysis[ticker] = {
+            "market_data_as_of": str(state["raw_data"].index[-1]),
+            "current_price": price,
+            "technical": {"signal": state.get("technical_signal"), "detail": state.get("technical_detail")},
+            "fundamental": {"signal": state.get("fundamental_signal"), "detail": state.get("fundamental_detail")},
+            "sentiment": {"signal": state.get("sentiment_signal"), "detail": state.get("sentiment_detail"),
+                          "headlines": state.get("sentiment_headlines"), "llm": state.get("sentiment_llm")},
+            "decision": decision,
         }
 
-    # Include recent prices for existing holdings outside this run's watchlist.
-    current_prices = {
-        ticker: decision["current_price"]
-        for ticker, decision in raw_decisions.items()
-    }
-    held_tickers_missing_prices = [
-        ticker
-        for ticker in portfolio.get("holdings", {})
-        if ticker not in current_prices
-    ]
-    current_prices.update(fetch_latest_prices(held_tickers_missing_prices))
+    missing = [t for t in portfolio["holdings"] if t not in prices]
+    if missing:
+        print(f"\n[Prices] Fetching latest prices for holdings outside this watchlist: {missing}")
+        prices.update(fetch_latest_prices(missing))
 
-    print("\n--- RISK MANAGER REVIEW ---")
-    risk_adjusted = apply_risk_management(
-        raw_decisions,
-        portfolio,
-        current_prices,
-    )
+    print("\n--- RISK REVIEW ---")
+    orders, summary = review_trades(portfolio, decisions, prices)
+    print_review(orders, summary)
 
-    print("\n--- EXECUTING SIMULATED TRADES ---")
-    transaction_start = len(portfolio.get("transactions", []))
-    portfolio = apply_trades(portfolio, risk_adjusted, run_id=run_id)
+    print("\n--- EXECUTING APPROVED ORDERS (simulated) ---")
+    portfolio = apply_orders(portfolio, orders, prices, run_id=run_id)
     save_portfolio(portfolio)
 
-    new_transactions = portfolio["transactions"][transaction_start:]
-
-    audit_record = {
-        "run_id": run_id,
-        "run_at_utc": datetime.now(timezone.utc).isoformat(),
-        "watchlist": watchlist,
-        "current_prices": current_prices,
-        "analysis": analysis_records,
-        "risk_review": risk_adjusted,
-        "new_transactions": new_transactions,
-        "portfolio_before": portfolio_before,
-        "portfolio_after": portfolio,
-    }
-
     try:
-        append_audit_record(audit_record)
-    except OSError as error:
-        print(f"[Audit] Could not write audit record: {error}")
+        append_audit_record({
+            "run_id": run_id,
+            "run_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "config": {k: getattr(config, k) for k in CONFIG_KEYS},
+            "watchlist": watchlist,
+            "errors": errors,
+            "prices": prices,
+            "analysis": analysis,
+            "risk_review": {"orders": orders, "summary": summary},
+            "portfolio_before": portfolio_before,
+            "portfolio_after": portfolio,
+        })
+    except OSError as e:
+        print(f"[Audit] Could not write audit record: {e}")
 
-    print("\n--- CURRENT SIMULATED PORTFOLIO ---")
-    print(json.dumps(portfolio, indent=2))
+    equity = portfolio_equity(portfolio, prices)
+    print(f"\nCash: ${portfolio['cash']:,.2f} | Total equity: ${equity:,.2f}")
+    for t, h in portfolio["holdings"].items():
+        print(f"  {t}: {h['quantity']} shares @ avg ${h['avg_price']:,.2f}")
+
+
+if __name__ == "__main__":
+    run()

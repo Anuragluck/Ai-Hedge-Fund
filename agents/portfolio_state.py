@@ -1,156 +1,113 @@
+"""Portfolio accounting: cash, holdings, transaction log, peak equity.
+Fees and slippage live here so live paper trades and backtests share the same maths."""
+
 import json
 import os
 from datetime import datetime, timezone
 
+from agents.config import FEE_BPS, SLIPPAGE_BPS
+
 PORTFOLIO_FILE = "portfolio.json"
+
+
+def fill_price(side, price):
+    slip = SLIPPAGE_BPS / 10_000
+    return price * (1 + slip) if side == "BUY" else price * (1 - slip)
+
+
+def trade_fee(notional):
+    return notional * FEE_BPS / 10_000
+
+
+def new_portfolio(capital):
+    return {"cash": float(capital), "holdings": {}, "transactions": [], "peak_equity": float(capital)}
+
+
+def portfolio_equity(portfolio, prices):
+    """Cash plus holdings valued at the given prices (average cost if a price is missing)."""
+    total = float(portfolio["cash"])
+    for ticker, h in portfolio["holdings"].items():
+        total += h["quantity"] * prices.get(ticker, h["avg_price"])
+    return total
 
 
 def load_portfolio(starting_capital_prompt_fn):
     if not os.path.exists(PORTFOLIO_FILE):
-        starting_capital = float(starting_capital_prompt_fn())
-        portfolio = {
-            "cash": starting_capital,
-            "holdings": {},
-            "transactions": [],
-        }
+        portfolio = new_portfolio(starting_capital_prompt_fn())
         save_portfolio(portfolio)
         return portfolio
 
-    with open(PORTFOLIO_FILE, "r", encoding="utf-8") as file:
-        portfolio = json.load(file)
+    with open(PORTFOLIO_FILE, "r", encoding="utf-8") as f:
+        portfolio = json.load(f)
 
-    portfolio.setdefault("cash", 0.0)
+    portfolio["cash"] = float(portfolio.get("cash", 0.0))
     portfolio.setdefault("holdings", {})
     portfolio.setdefault("transactions", [])
-    portfolio["cash"] = float(portfolio["cash"])
-
-    print(
-        f"[Portfolio] Loaded existing portfolio: ${portfolio['cash']:.2f} cash, "
-        f"{len(portfolio['holdings'])} position(s), "
-        f"{len(portfolio['transactions'])} past transaction(s)"
-    )
+    # Older files have no peak: start from cost-basis equity.
+    portfolio.setdefault("peak_equity", portfolio_equity(portfolio, {}))
+    print(f"[Portfolio] Loaded existing portfolio: ${portfolio['cash']:.2f} cash, "
+          f"{len(portfolio['holdings'])} position(s), "
+          f"{len(portfolio['transactions'])} past transaction(s)")
     return portfolio
 
 
 def save_portfolio(portfolio):
-    temporary_path = PORTFOLIO_FILE + ".tmp"
-
-    with open(temporary_path, "w", encoding="utf-8") as file:
-        json.dump(portfolio, file, indent=2)
-        file.flush()
-        os.fsync(file.fileno())
-
-    os.replace(temporary_path, PORTFOLIO_FILE)
-
-
-def _log_transaction(portfolio, ticker, action, quantity, price, run_id=None):
-    transaction = {
-        "date": datetime.now(timezone.utc).isoformat(),
-        "ticker": ticker,
-        "action": action,
-        "quantity": int(quantity),
-        "price": float(price),
-    }
-    if run_id:
-        transaction["run_id"] = run_id
-
-    portfolio.setdefault("transactions", []).append(transaction)
+    """Write to a temp file, then swap it in, so a crash cannot leave a half-written file."""
+    tmp = PORTFOLIO_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(portfolio, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, PORTFOLIO_FILE)
 
 
-def apply_trades(portfolio, risk_adjusted_decisions, run_id=None):
-    portfolio.setdefault("holdings", {})
-    portfolio.setdefault("transactions", [])
+def apply_orders(portfolio, orders, prices, run_id=None):
+    """Execute only orders the risk module approved (sells first). Raises if an order
+    would overspend cash or sell shares that are not held: that means a bug upstream."""
+    holdings = portfolio["holdings"]
 
-    # Apply sells before buys, because approved sale proceeds can fund buys.
-    ordered_decisions = sorted(
-        (
-            (ticker, decision)
-            for ticker, decision in risk_adjusted_decisions.items()
-            if ticker != "_summary"
-        ),
-        key=lambda item: 0 if item[1]["action"] == "SELL" else 1,
-    )
+    for o in sorted(orders, key=lambda o: 0 if o["side"] == "SELL" else 1):
+        if not o["approved"] or o["quantity"] <= 0:
+            continue
+        ticker, qty, fp, fee = o["ticker"], o["quantity"], o["fill_price"], o["fee"]
 
-    for ticker, decision in ordered_decisions:
-        action = decision["action"]
-        price = float(decision.get("current_price", 0))
-
-        if action == "SELL":
-            holding = portfolio["holdings"].get(ticker)
-            quantity = int(decision.get("quantity", 0))
-
-            if not holding or quantity <= 0:
-                continue
-            if price <= 0:
-                raise ValueError(f"Invalid sale price for {ticker}")
-
-            quantity = min(quantity, int(holding["quantity"]))
-            proceeds = quantity * price
-
-            # Critical fix: add proceeds to cash; do not replace the balance.
-            portfolio["cash"] = float(portfolio["cash"]) + proceeds
-
-            remaining_quantity = int(holding["quantity"]) - quantity
-            if remaining_quantity == 0:
-                del portfolio["holdings"][ticker]
+        if o["side"] == "BUY":
+            cost = qty * fp + fee
+            if cost > portfolio["cash"] + 1e-6:
+                raise ValueError(f"BUY {ticker} costs ${cost:,.2f} but cash is ${portfolio['cash']:,.2f}")
+            portfolio["cash"] -= cost
+            old = holdings.get(ticker)
+            if old:
+                total = old["quantity"] + qty
+                avg = (old["quantity"] * old["avg_price"] + qty * fp) / total
+                holdings[ticker] = {"quantity": total, "avg_price": round(avg, 6)}
             else:
-                holding["quantity"] = remaining_quantity
-
-            _log_transaction(
-                portfolio, ticker, "SELL", quantity, price, run_id
-            )
-            print(
-                f"[Portfolio] Sold {quantity} {ticker} for ${proceeds:.2f}. "
-                f"Cash now: ${portfolio['cash']:.2f}"
-            )
-
-    for ticker, decision in ordered_decisions:
-        if decision["action"] != "BUY":
-            continue
-        if not decision.get("risk_approved"):
-            continue
-
-        quantity = int(decision.get("quantity", 0))
-        price = float(decision.get("current_price", 0))
-
-        if quantity <= 0:
-            continue
-        if price <= 0:
-            raise ValueError(f"Invalid purchase price for {ticker}")
-
-        cost = quantity * price
-        if cost > float(portfolio["cash"]) + 1e-8:
-            raise ValueError(
-                f"Risk-approved BUY for {ticker} costs ${cost:.2f}, "
-                f"but only ${portfolio['cash']:.2f} cash remains."
-            )
-
-        portfolio["cash"] = float(portfolio["cash"]) - cost
-
-        existing = portfolio["holdings"].get(ticker)
-        if existing:
-            old_quantity = int(existing["quantity"])
-            total_quantity = old_quantity + quantity
-            total_cost = (
-                old_quantity * float(existing["avg_price"])
-                + cost
-            )
-            portfolio["holdings"][ticker] = {
-                "quantity": total_quantity,
-                "avg_price": round(total_cost / total_quantity, 6),
-            }
+                holdings[ticker] = {"quantity": qty, "avg_price": round(fp, 6)}
         else:
-            portfolio["holdings"][ticker] = {
-                "quantity": quantity,
-                "avg_price": round(price, 6),
-            }
+            held = holdings.get(ticker)
+            if not held or qty > held["quantity"]:
+                raise ValueError(f"SELL {ticker} x{qty} but position is {held}")
+            portfolio["cash"] += qty * fp - fee
+            if qty == held["quantity"]:
+                del holdings[ticker]
+            else:
+                held["quantity"] -= qty
 
-        _log_transaction(
-            portfolio, ticker, "BUY", quantity, price, run_id
-        )
-        print(
-            f"[Portfolio] Bought {quantity} {ticker} for ${cost:.2f}. "
-            f"Cash now: ${portfolio['cash']:.2f}"
-        )
+        portfolio["transactions"].append({
+            "date": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "run_id": run_id,
+            "ticker": ticker,
+            "action": o["side"],
+            "quantity": qty,
+            "signal_price": o["signal_price"],
+            "fill_price": fp,
+            "fee": fee,
+            "reason": o["reason"],
+        })
+        print(f"[Portfolio] {o['side']} {qty} {ticker} @ ${fp:,.2f} (fee ${fee:,.2f}). "
+              f"Cash now: ${portfolio['cash']:,.2f}")
 
+    equity = portfolio_equity(portfolio, prices)
+    portfolio["peak_equity"] = max(portfolio.get("peak_equity", equity), equity)
+    portfolio["cash"] = round(portfolio["cash"], 2)
     return portfolio

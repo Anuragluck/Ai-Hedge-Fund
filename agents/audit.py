@@ -5,11 +5,7 @@ AUDIT_FILE = "audit_log.jsonl"
 
 
 def append_audit_record(record, path=AUDIT_FILE):
-    record = {
-        "recorded_at_utc": datetime.now(timezone.utc).isoformat(),
-        **record,
-    }
-
-    with open(path, "a", encoding="utf-8") as file:
-        file.write(json.dumps(record, separators=(",", ":")) + "\n")
-        file.flush()
+    """One JSON object per line, appended. Nothing is ever rewritten."""
+    record = {"recorded_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"), **record}
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, default=str, separators=(",", ":")) + "\n")

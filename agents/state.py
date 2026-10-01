@@ -1,4 +1,5 @@
-from typing import TypedDict, Any, Optional
+from typing import Any, Optional, TypedDict
+
 
 class HedgeFundState(TypedDict):
     ticker: str
@@ -9,4 +10,6 @@ class HedgeFundState(TypedDict):
     fundamental_detail: Optional[str]
     sentiment_signal: Optional[str]
     sentiment_detail: Optional[str]
+    sentiment_headlines: Optional[list]
+    sentiment_llm: Optional[dict]
     portfolio_decision: Optional[dict]

@@ -1,0 +1,6 @@
+langgraph
+langchain-groq
+yfinance
+pandas
+numpy
+pydantic

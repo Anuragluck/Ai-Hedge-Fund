@@ -113,9 +113,9 @@ def fundamental_analyst(state: HedgeFundState):
 
 
 # ---------- Sentiment Analyst (LLM-based, on purpose) ----------
-
+from typing import Literal
 class SentimentSignal(BaseModel):
-    sentiment: str = Field(description="One of: BULLISH, BEARISH, NEUTRAL")
+    sentiment: Literal["BULLISH", "BEARISH", "NEUTRAL"]
     reasoning: str = Field(description="One concise sentence")
 
 

@@ -3,3 +3,6 @@ venv/
 __pycache__/
 portfolio.json
 test_ignore_me.txt
+portfolio.json
+audit_log.jsonl
+*.tmp

@@ -3,9 +3,10 @@ from pydantic import BaseModel, Field
 from langchain_groq import ChatGroq
 from agents.state import HedgeFundState
 
+from typing import Literal
 
 class TradeDecision(BaseModel):
-    action: str = Field(description="One of: BUY, SELL, HOLD")
+    action: Literal["BUY", "SELL", "HOLD"]
     reasoning: str = Field(description="A concise, one-sentence explanation")
 
 

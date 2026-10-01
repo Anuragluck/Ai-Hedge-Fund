@@ -7,6 +7,12 @@ from agents.portfolio_mgr import portfolio_manager
 from agents.risk_manager import apply_risk_management
 from agents.portfolio_state import load_portfolio, save_portfolio, apply_trades
 import os
+import copy
+from datetime import datetime, timezone
+from uuid import uuid4
+
+from agents.data_fetcher import fetch_latest_prices
+from agents.audit import append_audit_record
 
 workflow = StateGraph(HedgeFundState)
 workflow.add_node("data_fetcher", fetch_market_data)
@@ -70,34 +76,95 @@ def get_portfolio_for_this_run():
 
 
 if __name__ == "__main__":
-    print("🚀 AI Hedge Fund - Multi-Ticker Portfolio Analysis\n")
+    print("AI Hedge Fund - Multi-Ticker Portfolio Analysis\n")
 
     portfolio = get_portfolio_for_this_run()
+    portfolio_before = copy.deepcopy(portfolio)
 
-    tickers_input = input("\nEnter tickers to analyze this run, comma-separated (e.g. AAPL,MSFT,NVDA): ").strip()
-    WATCHLIST = [t.strip().upper() for t in tickers_input.split(",") if t.strip()] or ["AAPL", "MSFT", "NVDA"]
+    tickers_input = input(
+        "\nEnter tickers to analyze this run, comma-separated "
+        "(e.g. AAPL,MSFT,NVDA): "
+    ).strip()
 
-    print(f"\nWatchlist: {WATCHLIST}")
+    watchlist = list(dict.fromkeys(
+        ticker.strip().upper()
+        for ticker in tickers_input.split(",")
+        if ticker.strip()
+    )) or ["AAPL", "MSFT", "NVDA"]
+
+    run_id = str(uuid4())
+
+    print(f"\nWatchlist: {watchlist}")
     print(f"Available cash: ${portfolio['cash']:,.2f}\n")
 
     raw_decisions = {}
+    analysis_records = {}
 
-    for ticker in WATCHLIST:
+    for ticker in watchlist:
         print(f"\n===== Processing {ticker} =====")
         final_state = app.invoke({"ticker": ticker})
 
-        decision = final_state["portfolio_decision"]
+        decision = dict(final_state["portfolio_decision"])
         current_price = float(final_state["raw_data"]["Close"].iloc[-1])
         decision["current_price"] = current_price
-
         raw_decisions[ticker] = decision
 
-    print("\n🛡️  --- RISK MANAGER REVIEW ---")
-    final_portfolio_decisions = apply_risk_management(raw_decisions, portfolio["cash"])
+        analysis_records[ticker] = {
+            "market_data_as_of": str(final_state["raw_data"].index[-1]),
+            "current_price": current_price,
+            "signals": {
+                "technical": final_state.get("technical_signal"),
+                "technical_detail": final_state.get("technical_detail"),
+                "fundamental": final_state.get("fundamental_signal"),
+                "fundamental_detail": final_state.get("fundamental_detail"),
+                "sentiment": final_state.get("sentiment_signal"),
+                "sentiment_detail": final_state.get("sentiment_detail"),
+            },
+            "portfolio_decision": decision,
+        }
 
-    print("\n📊 --- EXECUTING TRADES ---")
-    portfolio = apply_trades(portfolio, final_portfolio_decisions)
+    # Include recent prices for existing holdings outside this run's watchlist.
+    current_prices = {
+        ticker: decision["current_price"]
+        for ticker, decision in raw_decisions.items()
+    }
+    held_tickers_missing_prices = [
+        ticker
+        for ticker in portfolio.get("holdings", {})
+        if ticker not in current_prices
+    ]
+    current_prices.update(fetch_latest_prices(held_tickers_missing_prices))
+
+    print("\n--- RISK MANAGER REVIEW ---")
+    risk_adjusted = apply_risk_management(
+        raw_decisions,
+        portfolio,
+        current_prices,
+    )
+
+    print("\n--- EXECUTING SIMULATED TRADES ---")
+    transaction_start = len(portfolio.get("transactions", []))
+    portfolio = apply_trades(portfolio, risk_adjusted, run_id=run_id)
     save_portfolio(portfolio)
 
-    print("\n🏁 --- CURRENT PORTFOLIO STATE ---")
+    new_transactions = portfolio["transactions"][transaction_start:]
+
+    audit_record = {
+        "run_id": run_id,
+        "run_at_utc": datetime.now(timezone.utc).isoformat(),
+        "watchlist": watchlist,
+        "current_prices": current_prices,
+        "analysis": analysis_records,
+        "risk_review": risk_adjusted,
+        "new_transactions": new_transactions,
+        "portfolio_before": portfolio_before,
+        "portfolio_after": portfolio,
+    }
+
+    try:
+        append_audit_record(audit_record)
+    except OSError as error:
+        print(f"[Audit] Could not write audit record: {error}")
+
+    print("\n--- CURRENT SIMULATED PORTFOLIO ---")
     print(json.dumps(portfolio, indent=2))

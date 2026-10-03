@@ -153,23 +153,32 @@ def run_backtest(ticker, starting_capital=100_000, start="2023-01-03", end=None,
 def summarize_results(r):
     """Plain-English lines generated from the numbers (candidate explanations, not proof)."""
     s, h, b = r["strategy"], r["buy_and_hold"], r["benchmark"]
-    lines = []
+    cost_pts = (s["fees_paid"] + s["slippage_cost"]) / r["capital"] * 100
+    out_pct = 100 - s["pct_days_invested"]
     diff = s["total_return_pct"] - h["total_return_pct"]
-    lines.append(f"Strategy {s['total_return_pct']:+.1f}% vs buy-and-hold {h['total_return_pct']:+.1f}% "
-                 f"({'outperformed' if diff > 0 else 'underperformed'} by {abs(diff):.1f} pts).")
+
+    lines = [f"Strategy {s['total_return_pct']:+.1f}% vs buy-and-hold {h['total_return_pct']:+.1f}% "
+             f"({'outperformed' if diff > 0 else 'underperformed'} by {abs(diff):.1f} pts)."]
     if b:
         d2 = s["total_return_pct"] - b["total_return_pct"]
         lines.append(f"Versus {b['symbol']} {b['total_return_pct']:+.1f}%: "
                      f"{'ahead' if d2 > 0 else 'behind'} by {abs(d2):.1f} pts.")
     lines.append(f"Max drawdown {s['max_drawdown_pct']:.1f}% vs {h['max_drawdown_pct']:.1f}% for buy-and-hold; "
                  f"Sharpe {s['sharpe']:.2f} vs {h['sharpe']:.2f}.")
-    lines.append(f"Invested {s['pct_days_invested']:.0f}% of days; {s['num_orders']} orders; "
-                 f"fees ${s['fees_paid']:,.0f} + slippage ${s['slippage_cost']:,.0f}.")
+    lines.append(f"In the market {s['pct_days_invested']:.0f}% of days; {s['num_orders']} orders; "
+                 f"trading costs {cost_pts:.1f}% of capital.")
     if s["total_return_pct"] < 0:
         lines.append("The strategy lost money in this window.")
-    if diff < 0 and s["pct_days_invested"] < 80:
-        lines.append("Likely cause: it sat in cash for part of the move (a lagging rule exits late "
-                     "and re-enters late).")
-    if diff < 0 and s["num_orders"] >= 8 and s["total_return_pct"] < h["total_return_pct"]:
-        lines.append("Many orders: whipsaw trades and costs probably contributed.")
+    if diff < 0:
+        if out_pct >= 10:
+            lines.append(f"Out of the market {out_pct:.0f}% of days: a lagging rule exits after a fall has "
+                         "started and re-enters after a recovery has started, so it can miss part of the move.")
+        if cost_pts >= 0.25 * abs(diff):
+            lines.append(f"Costs ({cost_pts:.1f} pts) explain a meaningful part of the gap.")
+        else:
+            lines.append(f"Costs ({cost_pts:.1f} pts) explain only a small part of the gap.")
+    elif h["total_return_pct"] < 0:
+        lines.append("Exiting during the sell-off reduced the loss compared with holding.")
+    if s["max_drawdown_pct"] < h["max_drawdown_pct"]:
+        lines.append("Its drawdown was deeper than buy-and-hold's here: the exit rule did not protect in this window.")
     return lines
